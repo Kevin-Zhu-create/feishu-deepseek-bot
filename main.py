@@ -203,6 +203,10 @@ async def webhook(request: Request):
 # ============================================================
 # 健康检查
 # ============================================================
+@app.get("/")
+async def root():
+    return {"status": "ok"}
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "app_id": FEISHU_APP_ID[:8] + "***" if FEISHU_APP_ID else "未配置"}

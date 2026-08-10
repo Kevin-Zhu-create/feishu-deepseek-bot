@@ -175,13 +175,17 @@ async def webhook(request: Request):
         # 明文模式：body 本身就是事件数据
         event_data = body
 
-    event_type = event_data.get("type", "")
+    # 事件类型可能在顶层 type，也可能在 header.event_type
+    event_type = event_data.get("type", "") or event_data.get("header", {}).get("event_type", "")
     event = event_data.get("event", {})
+
+    logger.info(f"收到事件: type={event_type}, keys={list(event_data.keys())[:5]}")
 
     # 只处理消息事件
     if event_type == "im.message.receive_v1":
         msg_type = event.get("message", {}).get("message_type", "")
-        sender_id = event.get("sender", {}).get("sender_id", {}).get("open_id", "")
+        sender_info = event.get("sender", {}).get("sender_id", {})
+        sender_id = sender_info.get("open_id", "") or sender_info.get("user_id", "") or sender_info.get("union_id", "")
 
         if not sender_id:
             return JSONResponse({"code": 0})

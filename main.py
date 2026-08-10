@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import time
 import os
+import logging
 from typing import Optional
 
 import httpx
@@ -15,6 +16,9 @@ from openai import OpenAI
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 环境变量（部署时配置）
@@ -152,7 +156,7 @@ async def webhook(request: Request):
     # --- URL 验证 ---
     if body.get("type") == "url_verification":
         challenge = body.get("challenge", "")
-        app.logger.info(f"URL 验证成功")
+        logger.info(f"URL 验证成功")
         return JSONResponse({"challenge": challenge})
 
     # --- 消息事件 ---
@@ -165,7 +169,7 @@ async def webhook(request: Request):
             plain_json = AES_CIPHER.decrypt(encrypt_text)
             event_data = json.loads(plain_json)
         except Exception as e:
-            app.logger.error(f"解密失败: {e}")
+            logger.error(f"解密失败: {e}")
             raise HTTPException(400, f"解密失败: {e}")
     else:
         # 明文模式：body 本身就是事件数据
@@ -191,11 +195,11 @@ async def webhook(request: Request):
             text = "（非文本消息）"
 
         if text:
-            app.logger.info(f"收到消息 [{sender_id}]: {text[:200]}")
+            logger.info(f"收到消息 [{sender_id}]: {text[:200]}")
             user_name = await feishu.get_user_name(sender_id)
             reply = await chat_with_deepseek(text, user_name)
             result = await feishu.send_text(sender_id, reply)
-            app.logger.info(f"回复结果: {result}")
+            logger.info(f"回复结果: {result}")
 
     return JSONResponse({"code": 0})
 

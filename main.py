@@ -111,10 +111,9 @@ async def _exchange_token(grant_type: str, code_or_refresh: str) -> dict:
         data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"换取 user_access_token 失败: {data}")
-        token_data = data.get("data")
-        if not token_data:
-            raise Exception(f"token 响应中缺少 data 字段: {data}")
-        return token_data
+        if "access_token" not in data:
+            raise Exception(f"token 响应中缺少 access_token: {data}")
+        return data
 
 
 async def get_user_access_token() -> str:

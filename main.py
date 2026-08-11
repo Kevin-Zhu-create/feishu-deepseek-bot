@@ -126,19 +126,24 @@ class FeishuClient:
             return resp.content
 
     async def upload_to_drive(self, file_name: str, file_content: bytes) -> str:
-        """上传文件到飞书 Drive，返回 file_token"""
+        """上传文件到飞书 Drive，返回 file_token
+
+        注意：
+        - 不传 parent_type/parent_node，上传到用户 Drive 默认位置，避免 params error
+        - file_name 同时作为 multipart filename 和 form 字段
+        """
         token = await self.get_token()
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 self.DRIVE_UPLOAD_URL,
                 headers={"Authorization": f"Bearer {token}"},
-                files={
-                    "file": (file_name, file_content, "application/octet-stream"),
-                },
                 data={
                     "file_name": file_name,
-                    "parent_type": "explorer",
+                    "parent_type": "",
                     "parent_node": "",
+                },
+                files={
+                    "file": (file_name, file_content, "application/octet-stream"),
                 },
             )
             data = resp.json()

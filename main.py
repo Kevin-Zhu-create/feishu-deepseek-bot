@@ -1,6 +1,7 @@
 """
 飞书智能体后端 — 文本对话 + 语音转文字
 部署后需在飞书开放平台配置事件订阅 URL: https://<your-domain>/webhook
+语音转文字需额外完成 OAuth 授权: https://<your-domain>/auth
 """
 
 import json
@@ -12,11 +13,12 @@ import asyncio
 import logging
 import tempfile
 from typing import Optional
+from urllib.parse import urlencode
 
 import httpx
 from openai import OpenAI
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.responses import JSONResponse, RedirectResponse
 import uvicorn
 
 logging.basicConfig(level=logging.INFO)
@@ -29,8 +31,19 @@ FEISHU_APP_ID = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 FEISHU_ENCRYPT_KEY = os.environ.get("FEISHU_ENCRYPT_KEY", "")
 FEISHU_VERIFICATION_TOKEN = os.environ.get("FEISHU_VERIFICATION_TOKEN", "")
+FEISHU_REDIRECT_URI = os.environ.get(
+    "FEISHU_REDIRECT_URI", "https://web-production-50302.up.railway.app/callback"
+)
+
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+
+# OAuth 授权时申请的 scope（空格分隔）
+FEISHU_OAUTH_SCOPES = os.environ.get(
+    "FEISHU_OAUTH_SCOPES",
+    "minutes:minutes.upload:write minutes:minutes.search:read minutes:minutes.basic:read "
+    "minutes:minutes.artifacts:read minutes:minutes.media:export drive:drive:write offline_access",
+)
 
 app = FastAPI(title="Feishu Bot Backend")
 
@@ -58,6 +71,68 @@ if FEISHU_ENCRYPT_KEY:
     AES_CIPHER = AESCipher(FEISHU_ENCRYPT_KEY)
 
 # ============================================================
+# 用户 access_token 内存缓存
+# ============================================================
+_user_token_cache = {
+    "access_token": None,
+    "expires_at": 0,
+    "refresh_token": None,
+}
+
+
+def _save_user_token(access_token: str, expires_in: int, refresh_token: str):
+    """保存用户 token 到内存（Railway 容器重启后需重新授权）"""
+    _user_token_cache["access_token"] = access_token
+    _user_token_cache["expires_at"] = time.time() + expires_in - 60
+    _user_token_cache["refresh_token"] = refresh_token
+    logger.info("user_access_token 已保存")
+
+
+async def _exchange_token(grant_type: str, code_or_refresh: str) -> dict:
+    """用授权码或 refresh_token 换取 user_access_token"""
+    payload = {
+        "grant_type": grant_type,
+        "client_id": FEISHU_APP_ID,
+        "client_secret": FEISHU_APP_SECRET,
+    }
+    if grant_type == "authorization_code":
+        payload["code"] = code_or_refresh
+        payload["redirect_uri"] = FEISHU_REDIRECT_URI
+    else:  # refresh_token
+        payload["refresh_token"] = code_or_refresh
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://open.feishu.cn/open-apis/authen/v2/oauth/token",
+            json=payload,
+        )
+        data = resp.json()
+        if data.get("code") != 0:
+            raise Exception(f"换取 user_access_token 失败: {data}")
+        return data["data"]
+
+
+async def get_user_access_token() -> str:
+    """获取可用的 user_access_token，自动刷新"""
+    if _user_token_cache["access_token"] and time.time() < _user_token_cache["expires_at"]:
+        return _user_token_cache["access_token"]
+
+    if _user_token_cache["refresh_token"]:
+        logger.info("user_access_token 过期，用 refresh_token 刷新")
+        data = await _exchange_token("refresh_token", _user_token_cache["refresh_token"])
+        _save_user_token(
+            data["access_token"],
+            data.get("expires_in", 7200),
+            data.get("refresh_token", _user_token_cache["refresh_token"]),
+        )
+        return _user_token_cache["access_token"]
+
+    raise Exception(
+        "尚未完成用户 OAuth 授权，请先访问 /auth 完成授权"
+    )
+
+
+# ============================================================
 # 飞书 API 客户端
 # ============================================================
 class FeishuClient:
@@ -71,6 +146,7 @@ class FeishuClient:
         self._token_expires: float = 0
 
     async def get_token(self) -> str:
+        """应用身份 tenant_access_token（发消息等）"""
         if self._token and time.time() < self._token_expires - 60:
             return self._token
         async with httpx.AsyncClient() as client:
@@ -110,7 +186,7 @@ class FeishuClient:
             data = resp.json()
             return data.get("data", {}).get("user", {}).get("name", "用户")
 
-    # ---------- 语音转文字 ----------
+    # ---------- 语音转文字（必须用 user_access_token） ----------
 
     async def download_resource(self, message_id: str, file_key: str) -> bytes:
         """下载消息中的音频/文件资源"""
@@ -126,8 +202,8 @@ class FeishuClient:
             return resp.content
 
     async def get_root_folder_token(self) -> str:
-        """获取「我的空间」根目录 folder token"""
-        token = await self.get_token()
+        """获取「我的空间」根目录 folder token（用户身份）"""
+        token = await get_user_access_token()
         url = "https://open.feishu.cn/open-apis/drive/explorer/v2/root_folder/meta"
         async with httpx.AsyncClient() as client:
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
@@ -141,13 +217,8 @@ class FeishuClient:
             return folder_token
 
     async def upload_to_drive(self, file_name: str, file_content: bytes) -> str:
-        """上传文件到飞书 Drive，返回 file_token
-
-        注意：
-        - 必须提供 file_name, parent_type=explorer, parent_node=根目录token, size
-        - size 是必填参数，单位为字节
-        """
-        token = await self.get_token()
+        """上传文件到飞书 Drive（用户身份），返回 file_token"""
+        token = await get_user_access_token()
         folder_token = await self.get_root_folder_token()
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
@@ -171,8 +242,8 @@ class FeishuClient:
             return file_token
 
     async def upload_to_minutes(self, file_token: str) -> str:
-        """将 Drive 文件提交到妙记转录，返回 minute_token"""
-        token = await self.get_token()
+        """将 Drive 文件提交到妙记转录（用户身份），返回 minute_token"""
+        token = await get_user_access_token()
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 self.MINUTES_UPLOAD_URL,
@@ -187,8 +258,8 @@ class FeishuClient:
             return minute_token
 
     async def get_minutes_subtitle(self, minute_token: str) -> Optional[str]:
-        """获取妙记转录文字"""
-        token = await self.get_token()
+        """获取妙记转录文字（用户身份）"""
+        token = await get_user_access_token()
         async with httpx.AsyncClient() as client:
             # 方式1: 尝试获取演讲稿/段落
             url = (
@@ -216,11 +287,9 @@ class FeishuClient:
             data2 = resp2.json()
             if data2.get("code") == 0:
                 d = data2.get("data", {})
-                # 检查 transcript 文本
                 transcript_text = d.get("transcript", "")
                 if transcript_text:
                     return transcript_text
-                # 尝试从 paragraphs 提取
                 paragraphs = d.get("paragraphs", [])
                 if paragraphs:
                     text = "\n".join(
@@ -335,6 +404,46 @@ async def transcribe_audio(
             )
         except Exception:
             pass
+
+
+# ============================================================
+# OAuth 授权路由
+# ============================================================
+@app.get("/auth")
+async def auth():
+    """生成飞书 OAuth 授权链接，用户点击后完成授权"""
+    params = {
+        "client_id": FEISHU_APP_ID,
+        "response_type": "code",
+        "redirect_uri": FEISHU_REDIRECT_URI,
+        "scope": FEISHU_OAUTH_SCOPES,
+        "state": hashlib.sha256(os.urandom(32)).hexdigest()[:16],
+    }
+    url = "https://accounts.feishu.cn/open-apis/authen/v1/authorize?" + urlencode(params)
+    logger.info(f"生成 OAuth 链接: {url[:120]}...")
+    return {
+        "message": "请在浏览器中打开以下链接完成授权",
+        "auth_url": url,
+    }
+
+
+@app.get("/callback")
+async def callback(code: str = Query(...), state: Optional[str] = None):
+    """飞书 OAuth 回调：用授权码换取 user_access_token 并保存"""
+    try:
+        data = await _exchange_token("authorization_code", code)
+        _save_user_token(
+            data["access_token"],
+            data.get("expires_in", 7200),
+            data["refresh_token"],
+        )
+        return {
+            "message": "授权成功！现在可以发送语音/音频消息进行转文字了。",
+            "user_name": data.get("name", ""),
+        }
+    except Exception as e:
+        logger.error(f"OAuth 回调失败: {e}")
+        raise HTTPException(400, f"授权失败: {e}")
 
 
 # ============================================================
@@ -460,6 +569,7 @@ async def health():
     return {
         "status": "ok",
         "app_id": FEISHU_APP_ID[:8] + "***" if FEISHU_APP_ID else "未配置",
+        "user_auth": bool(_user_token_cache.get("refresh_token")),
     }
 
 

@@ -42,7 +42,7 @@ DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 FEISHU_OAUTH_SCOPES = os.environ.get(
     "FEISHU_OAUTH_SCOPES",
     "minutes:minutes.upload:write minutes:minutes.search:read minutes:minutes.basic:read "
-    "minutes:minutes.artifacts:read minutes:minutes.media:export drive:drive:write offline_access",
+    "minutes:minutes.artifacts:read minutes:minutes.media:export drive:drive offline_access",
 )
 
 app = FastAPI(title="Feishu Bot Backend")

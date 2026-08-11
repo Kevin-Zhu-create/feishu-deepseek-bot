@@ -40,7 +40,7 @@
 - `contact:user.base:readonly`
 
 **用户身份权限（user token，语音转文字必须）：**
-- `drive:drive:write`
+- `drive:drive`
 - `minutes:minutes.upload:write`
 - `minutes:minutes.search:read`
 - `minutes:minutes.basic:read`

@@ -125,22 +125,39 @@ class FeishuClient:
             logger.info(f"下载资源成功: {message_id}/{file_key}, size={len(resp.content)}")
             return resp.content
 
+    async def get_root_folder_token(self) -> str:
+        """获取「我的空间」根目录 folder token"""
+        token = await self.get_token()
+        url = "https://open.feishu.cn/open-apis/drive/explorer/v2/root_folder/meta"
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+            data = resp.json()
+            if data.get("code") != 0:
+                raise Exception(f"获取根目录失败: {data}")
+            folder_token = data.get("data", {}).get("token", "")
+            if not folder_token:
+                raise Exception("根目录 token 为空")
+            logger.info(f"根目录 token: {folder_token}")
+            return folder_token
+
     async def upload_to_drive(self, file_name: str, file_content: bytes) -> str:
         """上传文件到飞书 Drive，返回 file_token
 
         注意：
-        - 不传 parent_type/parent_node，上传到用户 Drive 默认位置，避免 params error
-        - file_name 同时作为 multipart filename 和 form 字段
+        - 必须提供 file_name, parent_type=explorer, parent_node=根目录token, size
+        - size 是必填参数，单位为字节
         """
         token = await self.get_token()
+        folder_token = await self.get_root_folder_token()
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
                 self.DRIVE_UPLOAD_URL,
                 headers={"Authorization": f"Bearer {token}"},
                 data={
                     "file_name": file_name,
-                    "parent_type": "",
-                    "parent_node": "",
+                    "parent_type": "explorer",
+                    "parent_node": folder_token,
+                    "size": str(len(file_content)),
                 },
                 files={
                     "file": (file_name, file_content, "application/octet-stream"),
@@ -384,7 +401,15 @@ async def webhook(request: Request):
                 file_key = ""
 
             if msg_type == "audio" and file_key:
-                # 飞书语音消息
+                # 飞书语音消息：飞书事件本身已附带 speech_to_text，优先直接返回
+                speech_text = content.get("speech_to_text", "")
+                if speech_text:
+                    logger.info(f"直接使用飞书语音识别结果: {speech_text[:100]}")
+                    await feishu.send_text(
+                        sender_id, f"🎙️ 语音转文字结果：\n\n{speech_text}"
+                    )
+                    return JSONResponse({"code": 0})
+                # 如果没有 speech_to_text，降级到 Drive + 妙记
                 file_name = f"voice_{message_id}.amr"
                 await feishu.send_text(sender_id, "收到语音消息，正在转写文字…")
                 asyncio.create_task(

@@ -88,6 +88,16 @@ def _save_user_token(access_token: str, expires_in: int, refresh_token: str):
     logger.info("user_access_token 已保存")
 
 
+def _safe_json(resp: httpx.Response, context: str) -> dict:
+    """安全解析响应 JSON，失败时打印原始响应并抛出"""
+    try:
+        return resp.json()
+    except Exception as e:
+        text = resp.text
+        logger.error(f"解析 {context} 响应失败: {e}, status={resp.status_code}, body={text[:1000]}")
+        raise Exception(f"解析 {context} 响应失败: {e}, body={text[:200]}")
+
+
 async def _exchange_token(grant_type: str, code_or_refresh: str) -> dict:
     """用授权码或 refresh_token 换取 user_access_token"""
     payload = {
@@ -238,7 +248,7 @@ class FeishuClient:
                     "file": (file_name, file_content, "application/octet-stream"),
                 },
             )
-            data = resp.json()
+            data = _safe_json(resp, "drive_upload")
             if data.get("code") != 0:
                 raise Exception(f"上传到 Drive 失败: {data}")
             file_token = data.get("data", {}).get("file_token")
@@ -254,10 +264,18 @@ class FeishuClient:
                 headers={"Authorization": f"Bearer {token}"},
                 json={"file_token": file_token},
             )
-            data = resp.json()
+            data = _safe_json(resp, "minutes_upload")
             if data.get("code") != 0:
                 raise Exception(f"创建妙记失败: {data}")
-            minute_token = data.get("data", {}).get("minute_token")
+            d = data.get("data", {})
+            minute_token = d.get("minute_token") or d.get("token")
+            if not minute_token:
+                # 部分版本只返回 minute_url，从 URL 末尾提取 token
+                minute_url = d.get("minute_url", "")
+                if minute_url:
+                    minute_token = minute_url.rstrip("/").rsplit("/", 1)[-1]
+            if not minute_token:
+                raise Exception(f"创建妙记响应中未找到 minute_token: {data}")
             logger.info(f"创建妙记成功: {minute_token}")
             return minute_token
 
@@ -271,7 +289,10 @@ class FeishuClient:
                 f"/transcripts"
             )
             resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
-            data = resp.json()
+            try:
+                data = _safe_json(resp, "minutes_transcripts")
+            except Exception:
+                data = {}
             if data.get("code") == 0:
                 transcripts = data.get("data", {}).get("transcripts", [])
                 if transcripts:
@@ -288,7 +309,10 @@ class FeishuClient:
             resp2 = await client.get(
                 detail_url, headers={"Authorization": f"Bearer {token}"}
             )
-            data2 = resp2.json()
+            try:
+                data2 = _safe_json(resp2, "minutes_detail")
+            except Exception:
+                data2 = {}
             if data2.get("code") == 0:
                 d = data2.get("data", {})
                 transcript_text = d.get("transcript", "")
@@ -401,7 +425,8 @@ async def transcribe_audio(
         )
 
     except Exception as e:
-        logger.error(f"语音转文字失败: {e}")
+        import traceback
+        logger.error(f"语音转文字失败: {e}\n{traceback.format_exc()}")
         try:
             await feishu.send_text(
                 open_id, f"语音转文字失败: {str(e)}"

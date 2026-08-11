@@ -88,6 +88,22 @@ def _save_user_token(access_token: str, expires_in: int, refresh_token: str):
     logger.info("user_access_token 已保存")
 
 
+def _load_user_token_from_env():
+    """启动时从环境变量加载用户 token（用于 Railway 等容器化部署）"""
+    access_token = os.environ.get("FEISHU_USER_ACCESS_TOKEN")
+    refresh_token = os.environ.get("FEISHU_USER_REFRESH_TOKEN")
+    if access_token and refresh_token:
+        _save_user_token(
+            access_token,
+            int(os.environ.get("FEISHU_USER_TOKEN_EXPIRES_IN", "7200")),
+            refresh_token,
+        )
+        logger.info("已从环境变量加载 user_access_token")
+
+
+_load_user_token_from_env()
+
+
 def _safe_json(resp: httpx.Response, context: str) -> dict:
     """安全解析响应 JSON，失败时打印原始响应并抛出"""
     try:
@@ -469,6 +485,12 @@ async def callback(code: str = Query(...), state: Optional[str] = None):
         return {
             "message": "授权成功！现在可以发送语音/音频消息进行转文字了。",
             "user_name": data.get("name", ""),
+            "tokens": {
+                "FEISHU_USER_ACCESS_TOKEN": data["access_token"],
+                "FEISHU_USER_REFRESH_TOKEN": data["refresh_token"],
+                "FEISHU_USER_TOKEN_EXPIRES_IN": str(data.get("expires_in", 7200)),
+            },
+            "note": "请把 tokens 加到 Railway 环境变量，避免容器重启后授权丢失。",
         }
     except HTTPException:
         raise

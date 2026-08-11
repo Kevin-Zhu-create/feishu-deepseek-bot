@@ -104,12 +104,17 @@ async def _exchange_token(grant_type: str, code_or_refresh: str) -> dict:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             "https://open.feishu.cn/open-apis/authen/v2/oauth/token",
-            json=payload,
+            data=payload,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
+        logger.info(f"token 响应 status={resp.status_code} body={resp.text[:500]}")
         data = resp.json()
         if data.get("code") != 0:
             raise Exception(f"换取 user_access_token 失败: {data}")
-        return data["data"]
+        token_data = data.get("data")
+        if not token_data:
+            raise Exception(f"token 响应中缺少 data 字段: {data}")
+        return token_data
 
 
 async def get_user_access_token() -> str:
@@ -441,8 +446,10 @@ async def callback(code: str = Query(...), state: Optional[str] = None):
             "message": "授权成功！现在可以发送语音/音频消息进行转文字了。",
             "user_name": data.get("name", ""),
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"OAuth 回调失败: {e}")
+        logger.error(f"OAuth 回调失败: {e}", exc_info=True)
         raise HTTPException(400, f"授权失败: {e}")
 
 
